@@ -12,7 +12,7 @@
  * context window, output cap and reasoning levels without touching route-owned
  * fields or overriding explicit settings.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -496,17 +496,17 @@ try {
 		"            contextWindow: 555555",
 		""
 	].join("\n"));
+	/*
+	 * The home layer must declare an UNRELATED section. A home `llm-pi-ai` row would
+	 * replace the stale profile's whole section during composition, wiping the
+	 * `contextWindow: 555555` the scenario depends on — so the test would pass even
+	 * if discovery wrongly selected the stale profile. Keeping the home layer away
+	 * from `llm-pi-ai` leaves that value visible to anything that reads it.
+	 */
 	writeFileSync(join(uneditedDir, "cordis.patch.yml"), [
-		"- id: llm-pi-ai",
+		"- id: some-other-plugin",
 		"  config:",
-		"    providers:",
-		"      probe:",
-		"        displayName: probe",
-		"        api: openai-responses",
-		"        baseURL: http://127.0.0.1:1/v1",
-		"        models:",
-		"          - id: probe/gpt-5.4",
-		"            name: probe/gpt-5.4",
+		"    someSetting: true",
 		""
 	].join("\n"));
 	/* What the adapter is fed: the same route, declaring nothing. */
@@ -533,13 +533,95 @@ try {
 		["--source", ADAPTER, "--plugin", PLUGIN, "--settings", adapterSettings, "--plugin-settings-auto", "--profile-patch", join(uneditedDir, "profiles", "web", "cordis.patch.yml")],
 		{ DSH_HOME: uneditedDir }
 	);
+	/*
+	 * Assert on the plugin's own view of the declarations, not on the resolved value:
+	 * selecting the stale profile would make `555555` look declared, which is the
+	 * behaviour under test. The resolved value is reported alongside so a failure says
+	 * which of the two happened.
+	 */
+	const uneditedRow = rowOf(unedited.rows, "probe/gpt-5.4");
 	expect(
 		"an unedited running profile does not fall back to another profile's declarations",
-		[unedited.status, rowOf(unedited.rows, "probe/gpt-5.4").contextWindow],
-		[0, catalogRow("openai", "gpt-5.4").contextWindow]
+		[unedited.status, uneditedRow.declared, uneditedRow.contextWindow],
+		[0, undefined, catalogRow("openai", "gpt-5.4").contextWindow]
 	);
 } finally {
 	rmSync(uneditedDir, { recursive: true, force: true });
+}
+
+/*
+ * Scenario 3f: what the layers do when one of them cannot be read.
+ *
+ * `existingPatchLayers()` drops the layers that are not there, so an error reaching
+ * the reader means the file exists and could not be opened. Treating that as
+ * "declares nothing" would honor the other layers while the failing one holds
+ * declarations this plugin cannot see — the exact borrow-over-invisible-declarations
+ * failure the fail-closed rule exists to prevent. And the composed answer has to be
+ * dropped with it, because the settings panel reads it without consulting the flag
+ * and writes the whole `providers.<route>.models` array back: a partial document
+ * would present superseded rows as stored declarations and could persist them.
+ */
+const unreadableDir = mkdtempSync(join(tmpdir(), "dsh-mm-unreadable-"));
+try {
+	const profileDir = join(unreadableDir, "profiles", "web");
+	mkdirSync(profileDir, { recursive: true });
+	const profilePatch = join(profileDir, "cordis.patch.yml");
+	writeFileSync(profilePatch, [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      probe:",
+		"        displayName: probe",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		"            contextWindow: 111111",
+		""
+	].join("\n"));
+	const homePatch = join(unreadableDir, "cordis.patch.yml");
+	writeFileSync(homePatch, [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      probe:",
+		"        displayName: probe",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	const adapterSettings = join(unreadableDir, "adapter-settings.yaml");
+	writeFileSync(adapterSettings, [
+		"llm-pi-ai:",
+		"  providers:",
+		"    probe:",
+		"      displayName: probe",
+		"      api: openai-responses",
+		"      baseURL: http://127.0.0.1:1/v1",
+		"      models:",
+		"        - id: probe/gpt-5.4",
+		"          name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	try {
+		chmodSync(homePatch, 0o000);
+		const denied = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", adapterSettings, "--plugin-settings-auto", "--profile-patch", profilePatch], { DSH_HOME: unreadableDir });
+		expect("an unreadable layer is reported", denied.stderr.includes("cannot read"), true);
+		/*
+		 * 262144 is the route default, which is what enrichment being off produces.
+		 * The point is that it is not 111111: the readable layer's declaration must
+		 * not be honored while the other layer's declarations are invisible.
+		 */
+		expect("and an unreadable layer disables enrichment instead of honoring the rest", rowOf(denied.rows, "probe/gpt-5.4").contextWindow, 262144);
+	} finally {
+		chmodSync(homePatch, 0o644);
+	}
+} finally {
+	rmSync(unreadableDir, { recursive: true, force: true });
 }
 
 /*
