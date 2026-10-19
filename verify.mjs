@@ -625,6 +625,114 @@ try {
 }
 
 /*
+ * Scenario 3g: an `insert:` row declares entries too.
+ *
+ * This package's own `cordis.patch.yml` adds its plugin row with `- insert:`, and
+ * `applyEntryPatches` pushes those rows into the target group — so an operator
+ * copying that form to declare a settings section would otherwise declare into a
+ * void: the routes vanish from the panel and enrichment borrows over limits it
+ * cannot see.
+ */
+const insertDir = mkdtempSync(join(tmpdir(), "dsh-mm-insert-"));
+try {
+	const profileDir = join(insertDir, "profiles", "web");
+	mkdirSync(profileDir, { recursive: true });
+	const insertPatch = join(profileDir, "cordis.patch.yml");
+	writeFileSync(insertPatch, [
+		"- insert:",
+		"    - id: llm-pi-ai",
+		"      config:",
+		"        providers:",
+		"          probe:",
+		"            displayName: probe",
+		"            api: openai-responses",
+		"            baseURL: http://127.0.0.1:1/v1",
+		"            models:",
+		"              - id: probe/gpt-5.4",
+		"                name: probe/gpt-5.4",
+		"                contextWindow: 777777",
+		""
+	].join("\n"));
+	const inserted = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", insertPatch, "--plugin-settings-auto", "--profile-patch", insertPatch], { DSH_HOME: insertDir });
+	expect("insert: a section declared through an insert row is read", [inserted.status, rowOf(inserted.rows, "probe/gpt-5.4").contextWindow], [0, 777777]);
+} finally {
+	rmSync(insertDir, { recursive: true, force: true });
+}
+
+/*
+ * Scenario 3h: a profile layer that cannot be read.
+ *
+ * `existsSync()` answers false for every failure, so an EACCES on the profile
+ * directory looked exactly like a profile that was never edited: the layer was
+ * dropped as "declares nothing" and the home layer was composed from — while the
+ * running adapter still held the declarations this plugin had stopped seeing. The
+ * home layer below declares the same route without the limit, so a partial view
+ * resolves to the catalog's value instead of the declared one.
+ */
+const hiddenDir = mkdtempSync(join(tmpdir(), "dsh-mm-hidden-"));
+try {
+	const profileDir = join(hiddenDir, "profiles", "web");
+	mkdirSync(profileDir, { recursive: true });
+	const profilePatch = join(profileDir, "cordis.patch.yml");
+	writeFileSync(profilePatch, [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      probe:",
+		"        displayName: probe",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		"            contextWindow: 888888",
+		""
+	].join("\n"));
+	writeFileSync(join(hiddenDir, "cordis.patch.yml"), [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      probe:",
+		"        displayName: probe",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	const adapterSettings = join(hiddenDir, "adapter-settings.yaml");
+	writeFileSync(adapterSettings, [
+		"llm-pi-ai:",
+		"  providers:",
+		"    probe:",
+		"      displayName: probe",
+		"      api: openai-responses",
+		"      baseURL: http://127.0.0.1:1/v1",
+		"      models:",
+		"        - id: probe/gpt-5.4",
+		"          name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	try {
+		/* The profile directory becomes untraversable, so stat on its patch fails EACCES. */
+		chmodSync(profileDir, 0o000);
+		const hidden = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", adapterSettings, "--plugin-settings-auto", "--profile-patch", profilePatch], { DSH_HOME: hiddenDir });
+		expect("an unreadable profile layer is reported, not skipped", hidden.stderr.includes("cannot read"), true);
+		/*
+		 * 262144 is the route default, which is what enrichment being off produces.
+		 * The catalog's 272000 is the value a partial view would resolve to — the
+		 * home layer composes over the profile one and the declared limit is invisible.
+		 */
+		expect("an unreadable profile layer disables enrichment instead of being skipped", [hidden.status, rowOf(hidden.rows, "probe/gpt-5.4").contextWindow], [0, 262144]);
+	} finally {
+		chmodSync(profileDir, 0o755);
+	}
+} finally {
+	rmSync(hiddenDir, { recursive: true, force: true });
+}
+
+/*
  * Scenario 4: input modalities ride the same chain by default, with narrower
  * settings available, because claiming image support an endpoint lacks fails a
  * turn instead of refusing the attachment.

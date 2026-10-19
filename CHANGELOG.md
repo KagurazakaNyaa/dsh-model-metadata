@@ -22,6 +22,19 @@
 - **home 层的补丁现在真的会被读到**：`readProfilePatches()` 把 `<home>/cordis.patch.yml` 组在 profile 层**之后**，所以只读其中一个等于只看声明的一个子集。现在两层都读、按 Loader 的顺序合成——只在 home 层声明的路由会出现在面板里，而 home 层改了 `contextWindow` 的话是 home 层的值生效。缓存失效同时覆盖两层。
 - **补丁还不存在的 profile 不再去读别的 profile**：`profileContext.patchPath` 指向的补丁可能还没创建（没编辑过的 profile）。以前会退回 mtime 发现，把**未激活** profile 的声明混进当前配置——面板于是列出没人配过的路由，显式上限被一个猜出来的值替换。现在这种情况只读 home 层。
 
+### 复审后修正（第二轮）
+
+- **缓存真的命中了**：`settingsCache.paths.join()`（纯路径）和 `revision`（`path:mtime:size`）两种形状被直接比较，永远不相等——于是每次解析（包括设置面板背后每一次模型查询）都从磁盘重读并重解析所有补丁层。改为比较 `settingsCache.revision === revision`。
+- **读不到一层不再当作"什么都没声明"**：`readFileSync` 的 catch 是裸的，EACCES、EIO、EISDIR 都走了和"文件不存在"一样的 `continue`。而 `existingPatchLayers()` 已经把不存在的层滤掉了，走到这里说明文件存在但读不了——那是"有一层声明这个插件看不见"。现在任何读取失败都会让整份合成标记为不可读，不管有几层。
+- **合成失败时不再留下半份文档**：之前 `readable: false` 时合成的 `document` 仍被缓存并返回，而设置面板读 `settingsProviders()` 时不看这个标志，`buildOps()` 又会把整个 `providers.<route>.models` 数组写回去——半份文档会把已被取代的行当成"已存声明"展示，甚至可能被持久化。现在合成失败直接丢掉文档。
+- **"没编辑过的 profile" 那个场景不再被掩盖**：它的 home 层也声明了 `llm-pi-ai`，而 home 行会整段替换，把场景依赖的 `555555` 抹掉——于是即使发现逻辑错选了另一个 profile，测试照样过。home 层改为声明无关段，断言改为看插件自己的 `declared` 视图。
+- **"没有设置文档"的措辞不再误报**：单层读失败时（EACCES 等）之前也报 `no settings document`，现在只在真正 ENOENT/ENOTDIR 时报。
+
+### 复审后修正（第三轮）
+
+- **`insert:` 形式的行也能被读到**：这个包自己的 `cordis.patch.yml` 就是用 `- insert:` 加插件行的，而 `applyEntryPatches` 会把这些行推进目标组里。之前的循环只看外层 `id`，所以这么写的 `llm-pi-ai` 段完全看不见——路由从面板消失、补全会去覆盖看不见的声明。`sectionsFromPatches()` 和 `test-fallback.mjs` 现在都按 Loader 的顺序解析插入行。
+- **读不了的 profile 层不再被当成不存在**：`existsSync()` 对任何失败都返回 false，所以 profile 目录的权限问题和"从没编辑过的 profile"长得一样——层被当作"什么都没声明"丢掉，剩下的层照常生效，而运行中的适配器手里还握着这个插件已经看不见的声明。现在只有 ENOENT/ENOTDIR 才算"不在"，其余一律保留并让读取方报错、停掉补全。`settings.yaml` 那条旧路径也换成同一套判断。
+
 ## 0.3.0
 
 ### 修复

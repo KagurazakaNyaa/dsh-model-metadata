@@ -190,15 +190,18 @@ function loadProviders() {
 	/*
 	 * Either shape a DSH home can carry: a 0.1.x settings document
 	 * (`llm-pi-ai: { providers: … }`) or a 0.2.x profile patch layer (a list of
-	 * `{ id, config }` entries). The adapter only ever wants the section.
+	 * `{ id, config }` entries, with `insert:` rows among them). The adapter only
+	 * ever wants the section.
 	 */
 	/*
-	 * A config-less row is a marker, not a declaration: `sectionsFromPatches()` skips
-	 * it so the plugin still reads the earlier row's config, and this diagnostic has
-	 * to agree — otherwise `--settings` would refuse a patch the plugin accepts.
+	 * Read it the way the plugin does, so this tool accepts exactly the patches the
+	 * plugin accepts. A config-less row is a marker, not a declaration, and is
+	 * skipped by both; an `insert:` row declares its entries, so it has to be
+	 * searched too.
 	 */
 	const section = Array.isArray(parsed)
-		? parsed.findLast((patch) => patch?.id === "llm-pi-ai" && patch.config !== undefined)?.config
+		? [...parsed.flatMap((patch) => patch?.insert ?? []), ...parsed]
+				.findLast((row) => row?.id === "llm-pi-ai" && row.config !== undefined)?.config
 		: parsed["llm-pi-ai"];
 	if (section === undefined || typeof section.providers !== "object") {
 		console.error("that settings file has no llm-pi-ai.providers section");

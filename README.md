@@ -152,6 +152,17 @@ corepack enable pnpm        # Node 自带；或者 npm i -g pnpm
 
 补丁里**没有** `llm-pi-ai` 行不等于读不到：那是"读到了、但什么都没声明"，照常补全。只有整个补丁文件语法坏了才算读不到——半写的补丁就是半写的声明，和以前对坏文档的处理一样。
 
+`- insert:` 形式的行也算声明。这个包自己的 `cordis.patch.yml` 就是用这种写法加插件行的，所以照着它写 `llm-pi-ai` 段也没问题：
+
+```yaml
+- insert:
+    - id: llm-pi-ai
+      config:
+        providers: { … }
+```
+
+"读不到"和"不存在"是两件事：只有 `ENOENT`（真的没这个文件）才当作没声明；权限不够、I/O 错误这类一律算"读不到"，此时插件**完全不补**（而不是拿剩下的层凑一份），因为运行中的 DSH 手里还握着它看不见的那部分声明。
+
 `DSH_PI_AI_CATALOG_FALLBACK_LEVELS` 是为什么存在的：镜像站对某些模型只给一个"会推理"的裸标记、没有等级细节，把它当作"低/中/高都行"可能给端点送去它当场就拒绝的等级——和图片那个开关防的是同一类过度声明。设成 `bundled` 时，自带目录（它们本来就带等级映射）说了算，models.dev 只用来补容量。
 
 每个开关都做校验：**不设**就是上面的默认值；**写了但不认识**会在日志里报一次，然后落回一个写明的取值——大多数开关落到**保守**的那一端：`DSH_PI_AI_CATALOG_FALLBACK_INPUT` 认不出算 `off`、`DSH_PI_AI_CATALOG_FALLBACK_LEVELS` 认不出算 `bundled`、`DSH_PI_AI_CATALOG_REFRESH_ON_START` 认不出算 `off`；两个例外是**故意**落到宽松端（那正是它们的默认值，认不出时宁可维持原行为）：`DSH_PI_AI_CATALOG_FALLBACK` 认不出算 `full`、`DSH_PI_AI_CATALOG_PANEL` 认不出算 `on`。小时数只认普通的非负十进制数：`0x10` 这种写法会被拒绝并按默认值处理，不会悄悄读成 `0`（那等于关掉自动更新）。
