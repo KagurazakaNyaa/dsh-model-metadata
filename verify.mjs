@@ -12,7 +12,7 @@
  * context window, output cap and reasoning levels without touching route-owned
  * fields or overriding explicit settings.
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -264,7 +264,7 @@ expect("declared: an explicit level subset is respected", rowOf(declared, "probe
 expect("declared: the rest of that model is still filled in", rowOf(declared, "probe/kimi-k3").contextWindow, catalogRow("moonshotai", "kimi-k3").contextWindow);
 /* A declaration this plugin's own UI writes: the chain knows the name as
  * image-capable, and the row must keep saying text-only. */
-expect("declared: an explicit input list survives the chain", rowOf(declared, "probe/glm-5v-turbo").input, ["text"]);
+expect("declared: an explicit input list survives the chain", rowOf(declared, "probe/glm-4.6v").input, ["text"]);
 
 /*
  * Scenario 3b: the precedence rule's one dangerous hole. When the plugin cannot read the
@@ -298,21 +298,109 @@ try {
 }
 
 /*
+ * Scenario 3c: the 0.2.x home, where `settings.yaml` no longer exists.
+ *
+ * Since 0.2.0 the settings service renames that document to `settings.yaml.imported`
+ * on start and folds each section into `<home>/profiles/<name>/cordis.patch.yml`.
+ * A plugin that only ever reads `<home>/settings.yaml` therefore finds nothing on
+ * an upgraded install, and its fail-closed rule then turns the metadata fallback
+ * off entirely — the two controls vanish from the Settings page and reasoning
+ * levels stop being offered. So the same declarations must be honoured when they
+ * live in a patch layer, which is a list of `{ id, config }` entries rather than
+ * a mapping of section names.
+ */
+const upgradeDir = mkdtempSync(join(tmpdir(), "dsh-mm-upgrade-"));
+try {
+	/*
+	 * A home with no settings.yaml at all, and a profile patch carrying the same
+	 * rows: this is what the operator's disk looks like after the upgrade.
+	 */
+	const profileDir = join(upgradeDir, "profiles", "web");
+	mkdirSync(profileDir, { recursive: true });
+	const patchPath = join(profileDir, "cordis.patch.yml");
+	writeFileSync(patchPath, [
+		"- id: ui-settings-general",
+		"  config:",
+		"    welcomeNoticeVersion: 2026-09-28.1",
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      my-gateway:",
+		"        displayName: my-gateway",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		"            contextWindow: 64000",
+		"            maxTokens: 8000",
+		"            reasoningEfforts: false",
+		"          - id: probe/kimi-k3",
+		"            name: probe/kimi-k3",
+		"            reasoningEfforts:",
+		"              low: low",
+		"              high: high",
+		"          - id: probe/glm-4.6v",
+		"            name: probe/glm-4.6v",
+		"            input:",
+		"              - text",
+		"          - id: probe/glm-5.3",
+		"            name: probe/glm-5.3",
+		""
+	].join("\n"));
+	/*
+	 * The plugin reads the profile patch without being told which profile: the
+	 * `profileContext` service is what knows, and a headless run has none, so the
+	 * newest patch file in the home is what answers. `DSH_HOME` is the whole input
+	 * here — the point of the scenario is that no settings document is required.
+	 */
+	const upgraded = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", patchPath, "--plugin-settings", patchPath], { DSH_HOME: upgradeDir });
+	expect("0.2.x: a patch layer is read as the declarations, not refused", [upgraded.status, upgraded.rows === undefined], [0, false]);
+	expect("0.2.x: an explicit contextWindow in a patch row survives", rowOf(upgraded.rows, "probe/gpt-5.4").contextWindow, 64000);
+	expect("0.2.x: an explicit maxTokens in a patch row survives", rowOf(upgraded.rows, "probe/gpt-5.4").maxTokens, 8000);
+	expect("0.2.x: reasoningEfforts: false in a patch row is respected", rowOf(upgraded.rows, "probe/gpt-5.4").reasoning, []);
+	expect("0.2.x: an explicit level subset in a patch row is respected", rowOf(upgraded.rows, "probe/kimi-k3").reasoning, ["low", "high"]);
+	expect("0.2.x: an explicit input list in a patch row is respected", rowOf(upgraded.rows, "probe/glm-4.6v").input, ["text"]);
+	expect("0.2.x: a row that declares nothing is still filled from the chain", rowOf(upgraded.rows, "probe/glm-5.3").contextWindow, catalogRow("zai", "glm-5.3").contextWindow);
+
+	/*
+	 * And the shape alone is not enough: the same file has to answer when it is the
+	 * only thing on disk, found by discovery rather than passed by name. That is the
+	 * operator's actual case — nothing points the plugin at the profile patch.
+	 */
+	const discovered = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", patchPath, "--plugin-settings-auto"], { DSH_HOME: upgradeDir });
+	expect("0.2.x: the profile patch is found without being named", [discovered.status, rowOf(discovered.rows, "probe/gpt-5.4").contextWindow], [0, 64000]);
+
+	/*
+	 * A patch layer that parses but carries no llm-pi-ai row declares nothing, which
+	 * is not the same as being unreadable: the chain must still fill rows in.
+	 */
+	const otherProfile = join(upgradeDir, "profiles", "headless");
+	mkdirSync(otherProfile, { recursive: true });
+	const otherPatch = join(otherProfile, "cordis.patch.yml");
+	writeFileSync(otherPatch, "- id: ui-settings-general\n  config: {}\n");
+	const unrelated = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", PRECEDENCE, "--plugin-settings", otherPatch], { DSH_HOME: upgradeDir });
+	expect("0.2.x: a patch layer with no llm-pi-ai row is readable and declares nothing", [unrelated.status, rowOf(unrelated.rows, "probe/glm-5.3").contextWindow], [0, catalogRow("zai", "glm-5.3").contextWindow]);
+} finally {
+	rmSync(upgradeDir, { recursive: true, force: true });
+}
+
+/*
  * Scenario 4: input modalities ride the same chain by default, with narrower
  * settings available, because claiming image support an endpoint lacks fails a
  * turn instead of refusing the attachment.
  */
-expect("input: the chain decides images by default", rowOf(plugin, "probe/glm-5v-turbo").input, catalogInput("zai-coding-cn", "glm-5v-turbo"));
-expect("input: and that catalog row is not text-only, or this scenario would prove nothing", catalogInput("zai-coding-cn", "glm-5v-turbo").includes("image"), true);
+expect("input: the chain decides images by default", rowOf(plugin, "probe/glm-4.6v").input, catalogInput("zai-coding-cn", "glm-4.6v"));
+expect("input: and that catalog row is not text-only, or this scenario would prove nothing", catalogInput("zai-coding-cn", "glm-4.6v").includes("image"), true);
 expect("input: a text-only upstream keeps the model text-only", rowOf(plugin, "probe/glm-5.3").input, catalogInput("zai", "glm-5.3"));
 expect("input: the official route's own vision model declares image", rowOf(plugin, "probe/deepseek-v41-flash").input, officialInput("deepseek-flash"));
 const noInput = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_INPUT: "off" });
-expect("input=off: no modality is filled in", rowOf(noInput, "probe/glm-5v-turbo").input, ["text"]);
+expect("input=off: no modality is filled in", rowOf(noInput, "probe/glm-4.6v").input, ["text"]);
 const withInput = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_INPUT: "on" });
-expect("input=on: a vision model declares image", rowOf(withInput, "probe/glm-5v-turbo").input, catalogInput("zai-coding-cn", "glm-5v-turbo"));
+expect("input=on: a vision model declares image", rowOf(withInput, "probe/glm-4.6v").input, catalogInput("zai-coding-cn", "glm-4.6v"));
 expect("input=on: a models.dev-only claim is honoured too", rowOf(withInput, "probe/zephyr-9-pro").input, ["text", "image"]);
 const bundledOnly = run(["--source", ADAPTER, "--plugin", PLUGIN], { DSH_PI_AI_CATALOG_FALLBACK_INPUT: "bundled" });
-expect("input=bundled: the shipped catalog's claim still applies", rowOf(bundledOnly, "probe/glm-5v-turbo").input, catalogInput("zai-coding-cn", "glm-5v-turbo"));
+expect("input=bundled: the shipped catalog's claim still applies", rowOf(bundledOnly, "probe/glm-4.6v").input, catalogInput("zai-coding-cn", "glm-4.6v"));
 expect("input=bundled: the official deepseek catalog counts as shipped", rowOf(bundledOnly, "probe/deepseek-v41-flash").input, officialInput("deepseek-flash"));
 expect("input=bundled: a models.dev-only claim is ignored", rowOf(bundledOnly, "probe/zephyr-9-pro").input, ["text"]);
 
@@ -344,7 +432,7 @@ expect("fallback=context: capacities are still filled in", rowOf(contextOnly, "p
  * be able to see which half is off here.
  */
 expect("fallback=context: and reasoning is left to the seam", rowOf(contextOnly, "probe/glm-5.3").reasoning, []);
-expect("fallback=context: while image support still rides the chain", rowOf(contextOnly, "probe/glm-5v-turbo").input, catalogInput("zai-coding-cn", "glm-5v-turbo"));
+expect("fallback=context: while image support still rides the chain", rowOf(contextOnly, "probe/glm-4.6v").input, catalogInput("zai-coding-cn", "glm-4.6v"));
 /*
  * Reasoning levels are chosen the same way input modalities are, and for the same
  * reason: a bare `reasoning: true` from a mirror becomes five offered levels, which

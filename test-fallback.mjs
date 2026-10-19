@@ -32,15 +32,16 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const VALUED = ["--source", "--settings", "--plugin-settings", "--provider", "--plugin", "--node-modules", "--json-out"];
 
 function parseArgs(argv) {
-	const options = { source: undefined, settings: undefined, pluginSettings: undefined, provider: undefined, nodeModules: undefined, json: false, jsonOut: undefined, refresh: false };
+	const options = { source: undefined, settings: undefined, pluginSettings: undefined, pluginSettingsAuto: false, provider: undefined, nodeModules: undefined, json: false, jsonOut: undefined, refresh: false };
 	for (let at = 0; at < argv.length; at++) {
 		const arg = argv[at];
 		if (arg === "--help") {
-			console.log("node test-fallback.mjs [--source <adapter.js>] [--settings <settings.yaml>] [--plugin-settings <settings.yaml>] [--provider <route>] [--plugin <lib/index.mjs>] [--node-modules <dir>] [--json] [--json-out <file>] [--refresh]");
+			console.log("node test-fallback.mjs [--source <adapter.js>] [--settings <settings.yaml>] [--plugin-settings <settings.yaml>] [--plugin-settings-auto] [--provider <route>] [--plugin <lib/index.mjs>] [--node-modules <dir>] [--json] [--json-out <file>] [--refresh]");
 			process.exit(0);
 		}
 		if (arg === "--json") options.json = true;
 		else if (arg === "--refresh") options.refresh = true;
+		else if (arg === "--plugin-settings-auto") options.pluginSettingsAuto = true;
 		else if (VALUED.includes(arg)) {
 			const value = argv[++at];
 			/* A flag whose value is missing must not fall back to a default: this tool
@@ -101,7 +102,14 @@ if (options.settings !== undefined) process.env.DSH_PI_AI_SETTINGS_FILE = resolv
  * passes it gets no scratch document of its own.
  */
 if (options.pluginSettings !== undefined) process.env.DSH_PI_AI_SETTINGS_FILE = resolve(options.pluginSettings.replace(/^~/, process.env.HOME ?? "~"));
-else if (options.settings === undefined) {
+/*
+ * `--plugin-settings-auto` hands the plugin nothing at all, so it has to find the
+ * declarations the way it does in a real host process. That is the only way to
+ * test the discovery path: every other option names the file, which is exactly the
+ * thing under test.
+ */
+if (options.pluginSettingsAuto === true) delete process.env.DSH_PI_AI_SETTINGS_FILE;
+else if (options.pluginSettings === undefined && options.settings === undefined) {
 	/*
 	 * The plugin refuses to fill anything in when it cannot read the declarations it
 	 * is supposed to respect (that is its fail-closed rule), so a run with no
@@ -146,7 +154,7 @@ function loadProviders() {
 					{ id: "probe/kimi-k3", name: "probe/kimi-k3" },
 					{ id: "miclprobe/mimo-v2.5", name: "miclprobe/mimo-v2.5" },
 					{ id: "probe/minimax-m3", name: "probe/minimax-m3" },
-					{ id: "probe/glm-5v-turbo", name: "probe/glm-5v-turbo" },
+					{ id: "probe/glm-4.6v", name: "probe/glm-4.6v" },
 					/* the official deepseek route's V41 flash, in its three spellings */
 					{ id: "probe/deepseek-v4.1-flash", name: "probe/deepseek-v4.1-flash" },
 					{ id: "probe/deepseek-v41-flash", name: "probe/deepseek-v41-flash" },
@@ -170,8 +178,15 @@ function loadProviders() {
 	}
 	const require = createRequire(join(NODE_MODULES, "noop.js"));
 	const yaml = require("js-yaml");
-	const document = yaml.load(readFileSync(resolve(options.settings.replace(/^~/, process.env.HOME ?? "~")), "utf8"));
-	const section = document["llm-pi-ai"];
+	const parsed = yaml.load(readFileSync(resolve(options.settings.replace(/^~/, process.env.HOME ?? "~")), "utf8"));
+	/*
+	 * Either shape a DSH home can carry: a 0.1.x settings document
+	 * (`llm-pi-ai: { providers: … }`) or a 0.2.x profile patch layer (a list of
+	 * `{ id, config }` entries). The adapter only ever wants the section.
+	 */
+	const section = Array.isArray(parsed)
+		? parsed.findLast((patch) => patch?.id === "llm-pi-ai")?.config
+		: parsed["llm-pi-ai"];
 	if (section === undefined || typeof section.providers !== "object") {
 		console.error("that settings file has no llm-pi-ai.providers section");
 		process.exit(1);
@@ -187,6 +202,15 @@ function fakeContext() {
 	const ctx = {
 		get: () => undefined,
 		inject: noop,
+		/*
+		 * 0.2.x reads the settings namespace off the owning fiber
+		 * (`ctx.fiber.entry.options.id`), so a stub without one throws before the
+		 * adapter is registered. The id is the entry this plugin keys the panel and
+		 * its writes to.
+		 */
+		fiber: { entry: { options: { id: "llm-pi-ai" } }, state: 2 },
+		/* 0.2.x subscribes to its own config changes through the fiber. */
+		on: () => () => {},
 		logger: { debug: logged("debug"), info: logged("plugin"), warn: logged("warn"), error: logged("error") },
 		llm: {
 			registerConfigurableProviders: () => ({ replace: noop }),
@@ -208,7 +232,8 @@ function fakeContext() {
  * path used by the source-patch runs.
  */
 const adapterPath = options.plugin === undefined ? mirrorFor(SOURCE) : SOURCE;
-const { apply } = await import(pathToFileURL(adapterPath).href);
+const adapterModule = await import(pathToFileURL(adapterPath).href);
+const { apply } = adapterModule;
 const providers = loadProviders();
 const { ctx, captured } = fakeContext();
 if (options.plugin !== undefined) {
@@ -216,7 +241,13 @@ if (options.plugin !== undefined) {
 	plugin.apply(ctx);
 	console.log(`plugin: ${options.plugin} -> ${plugin.name ?? "(unnamed)"}`);
 }
-apply(ctx, providers);
+/*
+ * 0.2.x hands the adapter a schemastery section and reads routes through
+ * `config.providers.get()`; 0.1.x took the plain object. Resolving through the
+ * adapter's own `Config` export works for both, so one path drives either DSH.
+ */
+const config = adapterModule.Config === undefined ? providers : adapterModule.Config(providers);
+apply(ctx, config);
 const adapter = captured.adapter;
 if (adapter === undefined) {
 	console.error("apply() registered no adapter — nothing to test");

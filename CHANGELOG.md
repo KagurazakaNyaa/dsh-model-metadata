@@ -2,6 +2,21 @@
 
 这里记的是**用户能看到的变化**，倒序排列。历史更细的改动见 git 提交记录。
 
+## 0.3.1
+
+### 修复
+
+- **在 dsh 0.2.x 上找得到你的声明了**：从 0.2.0 起，`$DSH_HOME/settings.yaml` 这个形态被去掉——设置服务启动时把它改名成 `settings.yaml.imported`，各段并进 `$DSH_HOME/profiles/<profile名>/cordis.patch.yml`。插件此前只认前者，于是在升级后的 home 上判定"读不到声明"：设置 → 模型里的**两个开关不出现**（面板数据路由的矩阵为空，没有行可渲染），而且 0.3.0 的 fail-closed 规则会把**推理等级补全也一起停掉**——模型选择器里那个等级菜单同样是死的。现在插件按顺序找：`DSH_PI_AI_SETTINGS_FILE` → `$DSH_HOME/settings.yaml` → profile 补丁（先问 `profileContext` 当前跑的是哪个 profile，拿不到就取 mtime 最新的补丁文件）。`llm-deepseek` 段同样处理，所以官方路由目录里被手工改过的部分也照样生效。
+- **补丁里没有 `llm-pi-ai` 行不再等于读不到**：那是"读到了、但什么都没声明"，照常补全；只有补丁文件本身语法坏了才算读不到。
+- **`DSH_PI_AI_SETTINGS_FILE` 现在两种形态都收**：旧形态的 `llm-pi-ai:` 文档，或直接指向一个 `cordis.patch.yml`。
+- **测试工具适配 0.2.x 的适配器接口**：0.2.x 的 `apply()` 从 `ctx.fiber.entry.options.id` 取设置命名空间、经 `ctx.on` 订阅配置变更，并把配置作为 schemastery 段传入（`config.providers.get()`）而不是普通对象。`verify.mjs`、`test-fallback.mjs` 以及 hot-snapshot / hot-add-model / live-refresh 三个套件此前都在厂商代码里就崩了（`Cannot read properties of undefined (reading 'entry')`），CI 从 0.2.0-rc.2 发布起就没再真正跑过。
+
+### 测试
+
+- 新增一组回归场景：一个**没有 `settings.yaml`** 的 home，声明放在 `profiles/<名>/cordis.patch.yml` 里——补丁行里的 `contextWindow`、`maxTokens`、`reasoningEfforts: false`、`reasoningEfforts` 子集、`input` 都必须在最终解析结果里生效；不作任何声明的那行仍由目录补全；只带无关行的补丁算"可读但不声明"。其中"不指名文件、由插件自己发现"的那条断言，去掉本次修复会失败（实测四条核心断言全红），所以它挡的正是这次的回归。
+- `test-fallback.mjs` 的 `--settings` / `--plugin-settings` 现在两种文档形态都吃；新增 `--plugin-settings-auto`，让插件在完全不被告知路径的情况下自行发现。
+- 目录夹具跟进：`zai-coding-cn/glm-5v-turbo` 已不在自带目录里，改用同一路由下现在带视觉的 `glm-4.6v`（该场景断言的是"视觉走同一条链"，不是某个具体型号）。
+
 ## 0.3.0
 
 ### 修复
