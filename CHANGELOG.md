@@ -17,6 +17,11 @@
 - `test-fallback.mjs` 的 `--settings` / `--plugin-settings` 现在两种文档形态都吃；新增 `--plugin-settings-auto`，让插件在完全不被告知路径的情况下自行发现。
 - 目录夹具跟进：`zai-coding-cn/glm-5v-turbo` 已不在自带目录里，改用同一路由下现在带视觉的 `glm-4.6v`（该场景断言的是"视觉走同一条链"，不是某个具体型号）。
 
+### 复审后修正
+
+- **home 层的补丁现在真的会被读到**：`readProfilePatches()` 把 `<home>/cordis.patch.yml` 组在 profile 层**之后**，所以只读其中一个等于只看声明的一个子集。现在两层都读、按 Loader 的顺序合成——只在 home 层声明的路由会出现在面板里，而 home 层改了 `contextWindow` 的话是 home 层的值生效。缓存失效同时覆盖两层。
+- **补丁还不存在的 profile 不再去读别的 profile**：`profileContext.patchPath` 指向的补丁可能还没创建（没编辑过的 profile）。以前会退回 mtime 发现，把**未激活** profile 的声明混进当前配置——面板于是列出没人配过的路由，显式上限被一个猜出来的值替换。现在这种情况只读 home 层。
+
 ## 0.3.0
 
 ### 修复

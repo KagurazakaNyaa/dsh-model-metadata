@@ -32,16 +32,24 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const VALUED = ["--source", "--settings", "--plugin-settings", "--provider", "--plugin", "--node-modules", "--json-out"];
 
 function parseArgs(argv) {
-	const options = { source: undefined, settings: undefined, pluginSettings: undefined, pluginSettingsAuto: false, provider: undefined, nodeModules: undefined, json: false, jsonOut: undefined, refresh: false };
+	const options = { source: undefined, settings: undefined, pluginSettings: undefined, pluginSettingsAuto: false, profilePatch: undefined, provider: undefined, nodeModules: undefined, json: false, jsonOut: undefined, refresh: false };
 	for (let at = 0; at < argv.length; at++) {
 		const arg = argv[at];
 		if (arg === "--help") {
-			console.log("node test-fallback.mjs [--source <adapter.js>] [--settings <settings.yaml>] [--plugin-settings <settings.yaml>] [--plugin-settings-auto] [--provider <route>] [--plugin <lib/index.mjs>] [--node-modules <dir>] [--json] [--json-out <file>] [--refresh]");
+			console.log("node test-fallback.mjs [--source <adapter.js>] [--settings <settings.yaml>] [--plugin-settings <settings.yaml>] [--plugin-settings-auto] [--profile-patch <cordis.patch.yml>] [--provider <route>] [--plugin <lib/index.mjs>] [--node-modules <dir>] [--json] [--json-out <file>] [--refresh]");
 			process.exit(0);
 		}
 		if (arg === "--json") options.json = true;
 		else if (arg === "--refresh") options.refresh = true;
 		else if (arg === "--plugin-settings-auto") options.pluginSettingsAuto = true;
+		else if (arg === "--profile-patch") {
+			const value = argv[++at];
+			if (value === undefined) {
+				console.error("--profile-patch needs a value");
+				process.exit(1);
+			}
+			options.profilePatch = resolve(value.replace(/^~/, process.env.HOME ?? "~"));
+		}
 		else if (VALUED.includes(arg)) {
 			const value = argv[++at];
 			/* A flag whose value is missing must not fall back to a default: this tool
@@ -184,8 +192,13 @@ function loadProviders() {
 	 * (`llm-pi-ai: { providers: … }`) or a 0.2.x profile patch layer (a list of
 	 * `{ id, config }` entries). The adapter only ever wants the section.
 	 */
+	/*
+	 * A config-less row is a marker, not a declaration: `sectionsFromPatches()` skips
+	 * it so the plugin still reads the earlier row's config, and this diagnostic has
+	 * to agree — otherwise `--settings` would refuse a patch the plugin accepts.
+	 */
 	const section = Array.isArray(parsed)
-		? parsed.findLast((patch) => patch?.id === "llm-pi-ai")?.config
+		? parsed.findLast((patch) => patch?.id === "llm-pi-ai" && patch.config !== undefined)?.config
 		: parsed["llm-pi-ai"];
 	if (section === undefined || typeof section.providers !== "object") {
 		console.error("that settings file has no llm-pi-ai.providers section");
@@ -195,12 +208,19 @@ function loadProviders() {
 }
 
 /** A Cordis context stub: enough for `apply()` to build and hand us the adapter. */
-function fakeContext() {
+function fakeContext(options = {}) {
 	const captured = {};
 	const noop = () => {};
 	const logged = (level) => (...args) => process.stderr.write(`[${level}] ${args.map((value) => String(value)).join(" ")}\n`);
+	/*
+	 * `profilePatch` stands in for the launcher's `profileContext` service, which is
+	 * the only thing that tells a plugin which profile is running. Passing a path
+	 * whose file does not exist is how the "profile has never been edited" case is
+	 * reached — the service is there, its patch simply is not.
+	 */
+	const profileContext = options.profilePatch === undefined ? undefined : { name: "test", patchPath: options.profilePatch };
 	const ctx = {
-		get: () => undefined,
+		get: (name) => (name === "profileContext" ? profileContext : undefined),
 		inject: noop,
 		/*
 		 * 0.2.x reads the settings namespace off the owning fiber
@@ -235,9 +255,11 @@ const adapterPath = options.plugin === undefined ? mirrorFor(SOURCE) : SOURCE;
 const adapterModule = await import(pathToFileURL(adapterPath).href);
 const { apply } = adapterModule;
 const providers = loadProviders();
-const { ctx, captured } = fakeContext();
+const { ctx, captured } = fakeContext({ profilePatch: options.profilePatch });
+/* Hoisted: the row builder asks this module for its view of the declarations. */
+let plugin;
 if (options.plugin !== undefined) {
-	const plugin = await import(pathToFileURL(options.plugin).href);
+	plugin = await import(pathToFileURL(options.plugin).href);
 	plugin.apply(ctx);
 	console.log(`plugin: ${options.plugin} -> ${plugin.name ?? "(unnamed)"}`);
 }
@@ -264,6 +286,9 @@ for (const [provider, profile] of Object.entries(providers.providers)) {
 		rows.push({
 			provider,
 			id,
+			/* The plugin's own view of the declarations, which can differ from what the
+			 * adapter was fed — see the "unedited profile" scenario in verify.mjs. */
+			declared: declaredView(provider, id),
 			contextWindow: model?.contextWindow,
 			maxTokens: model?.maxTokens,
 			input: model?.input,
@@ -274,6 +299,25 @@ for (const [provider, profile] of Object.entries(providers.providers)) {
 			reasoning: info?.reasoning === undefined ? [] : info.reasoning.efforts.map((effort) => effort.id)
 		});
 	}
+}
+
+/**
+ * What the plugin considers declared for one model, read through the plugin's own
+ * resolution rather than reimplemented here.
+ *
+ * The plugin decides this from files it discovers itself, which is the behaviour
+ * under test in the "unedited profile" scenario, so reading it back is the only way
+ * to tell "it found no declaration" from "the adapter was handed this value".
+ * `settingsDocumentForTest` is a diagnostic seam the plugin exports for this.
+ * @param provider - the route.
+ * @param id - the model id.
+ * @returns the declared entry, or undefined.
+ */
+function declaredView(provider, id) {
+	/* No `--plugin` means no plugin to ask; the column is simply absent. */
+	if (plugin?.settingsDocumentForTest === undefined) return undefined;
+	const document = plugin.settingsDocumentForTest();
+	return document?.[plugin.settingsNamespaceForTest?.() ?? "llm-pi-ai"]?.providers?.[provider]?.models?.find((entry) => entry?.id === id);
 }
 
 if (options.jsonOut !== undefined) {

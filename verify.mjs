@@ -386,6 +386,163 @@ try {
 }
 
 /*
+ * Scenario 3d: the two layers 0.2.x composes, and the order between them.
+ *
+ * `readProfilePatches()` reads the profile patch and then `<home>/cordis.patch.yml`,
+ * and `applyEntryPatches` lets the later row replace the earlier row's config. So
+ * the home layer is not an alternative to the profile one — it composes *after* it,
+ * and a plugin that reads only one of the two sees a strict subset of what DSH
+ * resolves. That shows up twice: a route declared only in the home layer is missing
+ * from the panel, and a home row that restates a model's limits loses to the
+ * profile row, because the plugin never sees the value that is actually in force.
+ */
+const layeredDir = mkdtempSync(join(tmpdir(), "dsh-mm-layered-"));
+try {
+	const profileDir = join(layeredDir, "profiles", "web");
+	mkdirSync(profileDir, { recursive: true });
+	const profilePatch = join(profileDir, "cordis.patch.yml");
+	/*
+	 * The profile layer declares the route and one limit; the home layer restates a
+	 * different limit and adds a second route the profile never mentions.
+	 */
+	writeFileSync(profilePatch, [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      shared:",
+		"        displayName: shared",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		"            contextWindow: 111111",
+		"            maxTokens: 2222",
+		""
+	].join("\n"));
+	writeFileSync(join(layeredDir, "cordis.patch.yml"), [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      shared:",
+		"        displayName: shared",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		"            contextWindow: 333333",
+		"      home-only:",
+		"        displayName: home-only",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/kimi-k3",
+		"            name: probe/kimi-k3",
+		"            maxTokens: 4444",
+		""
+	].join("\n"));
+	/*
+	 * The adapter is fed the composed result the way DSH composes it, so the plugin's
+	 * view and the adapter's view can be compared: whatever the plugin thinks is
+	 * declared has to be what the adapter was given.
+	 */
+	const composed = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", join(layeredDir, "cordis.patch.yml"), "--plugin-settings-auto"], { DSH_HOME: layeredDir });
+	expect("layers: a route declared only in the home layer still reaches the panel", [composed.status, composed.rows.some((row) => row.provider === "home-only")], [0, true]);
+	expect("layers: the home layer's row wins over the profile layer's, as the Loader composes them", rowOf(composed.rows, "probe/gpt-5.4").contextWindow, 333333);
+	/*
+	 * A patch row replaces the target entry's `config` wholesale (`applyEntryPatches`
+	 * assigns each override key), so the home layer's `llm-pi-ai` row does not merge
+	 * into the profile layer's — it supersedes it. `maxTokens` therefore stops being
+	 * declared at all and the catalog fills it, which is the value DSH itself resolves.
+	 */
+	expect("layers: the home row supersedes the profile row's config rather than merging", rowOf(composed.rows, "probe/gpt-5.4").maxTokens, catalogRow("openai", "gpt-5.4").maxTokens);
+	expect("layers: a home-only row's own declaration survives", rowOf(composed.rows, "probe/kimi-k3").maxTokens, 4444);
+} finally {
+	rmSync(layeredDir, { recursive: true, force: true });
+}
+
+/*
+ * Scenario 3e: a profile that has never been edited.
+ *
+ * `profileContext.patchPath` names the running profile even when no file is there
+ * yet. Discovery must not then reach for a *different* profile's patch: that mixes
+ * declarations from a profile that is not running into the one that is, which is
+ * how the panel ends up listing routes nobody configured.
+ */
+const uneditedDir = mkdtempSync(join(tmpdir(), "dsh-mm-unedited-"));
+try {
+	/*
+	 * An inactive profile whose patch declares the same route with a distinctive
+	 * `contextWindow`, and a home layer that declares the route without one. If the
+	 * plugin reaches for the inactive profile it believes 555555 is declared and keeps
+	 * it; reading only the running profile (which has no patch) plus the home layer
+	 * leaves the catalog's value in place. Both outcomes are distinguishable, which is
+	 * the point — a scenario where they coincide proves nothing.
+	 */
+	const stale = join(uneditedDir, "profiles", "stale");
+	mkdirSync(stale, { recursive: true });
+	writeFileSync(join(stale, "cordis.patch.yml"), [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      probe:",
+		"        displayName: probe",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		"            contextWindow: 555555",
+		""
+	].join("\n"));
+	writeFileSync(join(uneditedDir, "cordis.patch.yml"), [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      probe:",
+		"        displayName: probe",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	/* What the adapter is fed: the same route, declaring nothing. */
+	const adapterSettings = join(uneditedDir, "adapter-settings.yaml");
+	writeFileSync(adapterSettings, [
+		"llm-pi-ai:",
+		"  providers:",
+		"    probe:",
+		"      displayName: probe",
+		"      api: openai-responses",
+		"      baseURL: http://127.0.0.1:1/v1",
+		"      models:",
+		"        - id: probe/gpt-5.4",
+		"          name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	/*
+	 * `DSH_PI_AI_SETTINGS_FILE` cannot express this case — it names a file, and the
+	 * point is that nothing is named. So the service is supplied instead and the
+	 * plugin is left to discover the rest: `--profile-patch` points at a patch that
+	 * does not exist, exactly as a profile nobody has edited yet looks.
+	 */
+	const unedited = runRaw(
+		["--source", ADAPTER, "--plugin", PLUGIN, "--settings", adapterSettings, "--plugin-settings-auto", "--profile-patch", join(uneditedDir, "profiles", "web", "cordis.patch.yml")],
+		{ DSH_HOME: uneditedDir }
+	);
+	expect(
+		"an unedited running profile does not fall back to another profile's declarations",
+		[unedited.status, rowOf(unedited.rows, "probe/gpt-5.4").contextWindow],
+		[0, catalogRow("openai", "gpt-5.4").contextWindow]
+	);
+} finally {
+	rmSync(uneditedDir, { recursive: true, force: true });
+}
+
+/*
  * Scenario 4: input modalities ride the same chain by default, with narrower
  * settings available, because claiming image support an endpoint lacks fails a
  * turn instead of refusing the attachment.
