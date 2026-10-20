@@ -29,7 +29,7 @@ import { sandbox } from "./tests/harness.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 /** Arguments that must be followed by a value. */
-const VALUED = ["--source", "--settings", "--plugin-settings", "--provider", "--plugin", "--node-modules", "--json-out"];
+const VALUED = ["--source", "--settings", "--plugin-settings", "--profile-patch", "--provider", "--plugin", "--node-modules", "--json-out"];
 
 function parseArgs(argv) {
 	const options = { source: undefined, settings: undefined, pluginSettings: undefined, pluginSettingsAuto: false, profilePatch: undefined, provider: undefined, nodeModules: undefined, json: false, jsonOut: undefined, refresh: false };
@@ -42,14 +42,6 @@ function parseArgs(argv) {
 		if (arg === "--json") options.json = true;
 		else if (arg === "--refresh") options.refresh = true;
 		else if (arg === "--plugin-settings-auto") options.pluginSettingsAuto = true;
-		else if (arg === "--profile-patch") {
-			const value = argv[++at];
-			if (value === undefined) {
-				console.error("--profile-patch needs a value");
-				process.exit(1);
-			}
-			options.profilePatch = resolve(value.replace(/^~/, process.env.HOME ?? "~"));
-		}
 		else if (VALUED.includes(arg)) {
 			const value = argv[++at];
 			/* A flag whose value is missing must not fall back to a default: this tool
@@ -61,6 +53,7 @@ function parseArgs(argv) {
 			if (arg === "--source") options.source = value;
 			else if (arg === "--settings") options.settings = value;
 			else if (arg === "--plugin-settings") options.pluginSettings = value;
+			else if (arg === "--profile-patch") options.profilePatch = resolve(value.replace(/^~/, process.env.HOME ?? "~"));
 			else if (arg === "--provider") options.provider = value;
 			else if (arg === "--plugin") options.plugin = value;
 			else if (arg === "--node-modules") options.nodeModules = value;

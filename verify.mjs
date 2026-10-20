@@ -733,6 +733,128 @@ try {
 }
 
 /*
+ * Scenario 3i: the same permission failure, reached by discovery.
+ *
+ * Scenario 3h supplies the service, so it never exercises the other branch: with no
+ * `profileContext` the plugin ranks candidate layers by mtime, and a `statSync`
+ * that fails for a reason other than absence used to be dropped as "no patch file
+ * in that profile". A profile directory that cannot be traversed then vanished,
+ * an *older* profile or the home layer composed in its place, and the result looked
+ * complete — while the running adapter still held the declarations.
+ */
+const discoverDir = mkdtempSync(join(tmpdir(), "dsh-mm-discover-"));
+try {
+	const profileDir = join(discoverDir, "profiles", "web");
+	mkdirSync(profileDir, { recursive: true });
+	const profilePatch = join(profileDir, "cordis.patch.yml");
+	writeFileSync(profilePatch, [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      probe:",
+		"        displayName: probe",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		"            contextWindow: 999999",
+		""
+	].join("\n"));
+	/* A readable home layer that declares the same route without the limit. */
+	writeFileSync(join(discoverDir, "cordis.patch.yml"), [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      probe:",
+		"        displayName: probe",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	const adapterSettings = join(discoverDir, "adapter-settings.yaml");
+	writeFileSync(adapterSettings, [
+		"llm-pi-ai:",
+		"  providers:",
+		"    probe:",
+		"      displayName: probe",
+		"      api: openai-responses",
+		"      baseURL: http://127.0.0.1:1/v1",
+		"      models:",
+		"        - id: probe/gpt-5.4",
+		"          name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	try {
+		chmodSync(profileDir, 0o000);
+		/*
+		 * No `--profile-patch`: this is the discovery branch, which is the one under
+		 * test. 262144 is the route default (enrichment off); 272000 would be the
+		 * partial view the home layer alone resolves to.
+		 */
+		const discovered = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", adapterSettings, "--plugin-settings-auto"], { DSH_HOME: discoverDir });
+		expect("discovery reports a layer it could not read", discovered.stderr.includes("cannot read"), true);
+		expect("discovery does not compose from the layers it can reach", [discovered.status, rowOf(discovered.rows, "probe/gpt-5.4").contextWindow], [0, 262144]);
+	} finally {
+		chmodSync(profileDir, 0o755);
+	}
+} finally {
+	rmSync(discoverDir, { recursive: true, force: true });
+}
+
+/*
+ * Scenario 3j: a profiles directory that cannot be listed.
+ *
+ * The other half of the same failure. `readdirSync` on the profiles directory threw
+ * out of discovery, which is out of model resolution — a degraded install is not a
+ * crash. It now becomes the unreadable-document case like any other layer failure.
+ */
+const listedDir = mkdtempSync(join(tmpdir(), "dsh-mm-listed-"));
+try {
+	mkdirSync(join(listedDir, "profiles"), { recursive: true });
+	writeFileSync(join(listedDir, "cordis.patch.yml"), [
+		"- id: llm-pi-ai",
+		"  config:",
+		"    providers:",
+		"      probe:",
+		"        displayName: probe",
+		"        api: openai-responses",
+		"        baseURL: http://127.0.0.1:1/v1",
+		"        models:",
+		"          - id: probe/gpt-5.4",
+		"            name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	const adapterSettings = join(listedDir, "adapter-settings.yaml");
+	writeFileSync(adapterSettings, [
+		"llm-pi-ai:",
+		"  providers:",
+		"    probe:",
+		"      displayName: probe",
+		"      api: openai-responses",
+		"      baseURL: http://127.0.0.1:1/v1",
+		"      models:",
+		"        - id: probe/gpt-5.4",
+		"          name: probe/gpt-5.4",
+		""
+	].join("\n"));
+	try {
+		chmodSync(join(listedDir, "profiles"), 0o000);
+		const unlisted = runRaw(["--source", ADAPTER, "--plugin", PLUGIN, "--settings", adapterSettings, "--plugin-settings-auto"], { DSH_HOME: listedDir });
+		expect("a profiles directory that cannot be listed is reported", unlisted.stderr.includes("cannot read"), true);
+		/* Degrades, never throws: the run completes and enrichment is off. */
+		expect("a profiles directory that cannot be listed degrades instead of throwing", [unlisted.status, rowOf(unlisted.rows, "probe/gpt-5.4").contextWindow], [0, 262144]);
+	} finally {
+		chmodSync(join(listedDir, "profiles"), 0o755);
+	}
+} finally {
+	rmSync(listedDir, { recursive: true, force: true });
+}
+
+/*
  * Scenario 4: input modalities ride the same chain by default, with narrower
  * settings available, because claiming image support an endpoint lacks fails a
  * turn instead of refusing the attachment.
@@ -894,6 +1016,19 @@ suite("refresh policy (disabled)", "tests/refresh-policy.mjs", { DSH_CATALOG_FAL
 suite("settings panel", "tests/panel.mjs", { DSH_CATALOG_FALLBACK_PLUGIN: PLUGIN });
 suite("unit", "tests/unit.mjs", { DSH_CATALOG_FALLBACK_PLUGIN: PLUGIN });
 suite("install-plugin", "tests/install-plugin.mjs");
+
+/*
+ * Scenario 7: the diagnostic's own argument parsing.
+ *
+ * `--profile-patch` had its own inline branch that only rejected a missing value, so
+ * `--profile-patch --plugin-settings-auto` consumed the flag as a filename — and then
+ * fell back to scratch settings, which looks exactly like a run that found no
+ * declarations. Every other valued option already refused flag-shaped values.
+ */
+{
+	const probe = spawnSync(process.execPath, [join(HERE, "test-fallback.mjs"), "--source", ADAPTER, "--settings", PRECEDENCE, "--profile-patch", "--plugin-settings-auto"], { encoding: "utf8", env: scenarioEnv({ DSH_CATALOG_FALLBACK_PLUGIN: PLUGIN }) });
+	expect("diagnostic: a flag where --profile-patch expects a path is refused", [probe.status, (probe.stderr ?? "").includes("needs a value")], [1, true]);
+}
 
 console.log("");
 console.log(`${String(checks - failures.length)}/${String(checks)} assertions passed`);
